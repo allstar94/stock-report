@@ -178,22 +178,35 @@ def fetch_watchlist_data() -> dict[str, list[dict]]:
 
 def fetch_fear_greed_index() -> dict:
     """Fetch CNN Fear & Greed Index."""
-    try:
-        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        data = resp.json()
-        fgi = data.get("fear_and_greed", {})
-        return {
-            "score": round(fgi.get("score", 0)),
-            "rating": fgi.get("rating", "N/A"),
-            "previous_close": round(fgi.get("previous_close", 0)),
-            "previous_1_week": round(fgi.get("previous_1_week", 0)),
-            "previous_1_month": round(fgi.get("previous_1_month", 0)),
-            "previous_1_year": round(fgi.get("previous_1_year", 0)),
-        }
-    except Exception as e:
-        print(f"  Warning: could not fetch Fear & Greed Index: {e}")
+    urls = [
+        "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+        "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/2025-01-01",
+    ]
+    for url in urls:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "application/json",
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                print(f"  Fear & Greed: HTTP {resp.status_code} from {url}")
+                continue
+            data = resp.json()
+            fgi = data.get("fear_and_greed", {})
+            if not fgi:
+                continue
+            return {
+                "score": round(fgi.get("score", 0)),
+                "rating": fgi.get("rating", "N/A"),
+                "previous_close": round(fgi.get("previous_close", 0)),
+                "previous_1_week": round(fgi.get("previous_1_week", 0)),
+                "previous_1_month": round(fgi.get("previous_1_month", 0)),
+                "previous_1_year": round(fgi.get("previous_1_year", 0)),
+            }
+        except Exception as e:
+            print(f"  Fear & Greed warning ({url}): {e}")
+    print("  Warning: all Fear & Greed sources failed")
         return {}
 
 
@@ -225,12 +238,14 @@ def fetch_economic_calendar() -> list[dict]:
         resp = requests.get(url, timeout=10)
         data = resp.json()
         events = data.get("economicCalendar", [])
-        # Filter for high-impact US events
+        # Filter for US events (impact >= 1 to catch more events)
         important = [
             e for e in events
             if e.get("country", "") == "US"
-            and e.get("impact", 0) >= 2
+            and e.get("impact", 0) >= 1
         ]
+        # Sort by impact descending
+        important.sort(key=lambda x: x.get("impact", 0), reverse=True)
         return [
             {
                 "event": e.get("event", ""),
@@ -353,8 +368,8 @@ def generate_ai_analysis(
         watchlist_text += f"\n[{cat}]\n" + fmt(stocks)
 
     news_text = "\n".join(
-        f"  [{i+1}] {a['source']}: {a['title']}\n      {a['summary'][:200]}"
-        for i, a in enumerate(news)
+        f"  [{i+1}] {a['source']}: {a['title']}"
+        for i, a in enumerate(news[:12])
     )
 
     # Fear & Greed
@@ -522,21 +537,27 @@ Rules:
 - Fear & Greed 점수 변화 추이를 심리 분석에 반영
 - 수익률 곡선 분석 반드시 포함"""
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt
-        )
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        print(f"  JSON parse error: {e}")
-        print(f"  Raw response (first 500 chars): {response.text[:500]}")
-        return {}
-    except Exception as e:
-        print(f"  Gemini API error: {e}")
-        return {}
+    import time
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt
+            )
+            text = response.text.strip()
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            print(f"  JSON parse error (attempt {attempt+1}): {e}")
+            print(f"  Raw response (first 300 chars): {response.text[:300]}")
+            if attempt < 2:
+                time.sleep(3)
+        except Exception as e:
+            print(f"  Gemini API error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(5)
+    print("  All Gemini attempts failed")
+    return {}
 
 
 # =====================================================
