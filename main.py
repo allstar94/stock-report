@@ -226,54 +226,82 @@ def fetch_yield_curve(bond_data: list[dict]) -> dict:
 
 
 def fetch_economic_calendar() -> list[dict]:
-    """Fetch upcoming economic events from Finnhub."""
-    if not FINNHUB_API_KEY:
-        print("  Warning: FINNHUB_API_KEY not set, skipping economic calendar")
-        return []
-    try:
+    """Fetch upcoming economic events. Try Finnhub first, fallback to RSS scraping."""
+    events = []
+
+    # Try Finnhub first
+    if FINNHUB_API_KEY:
+        try:
+            now = datetime.now(KST)
+            from_date = now.strftime("%Y-%m-%d")
+            to_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+            url = f"https://finnhub.io/api/v1/calendar/economic?from={from_date}&to={to_date}&token={FINNHUB_API_KEY}"
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            if "error" not in data:
+                raw = data.get("economicCalendar", [])
+                for e in raw:
+                    if e.get("country", e.get("countryCode", "")) == "US":
+                        events.append({
+                            "event": e.get("event", ""),
+                            "date": e.get("time", e.get("date", "")),
+                            "impact": str(e.get("impact", "medium")).lower(),
+                            "estimate": e.get("estimate"),
+                            "prev": e.get("prev"),
+                        })
+            else:
+                print(f"  Finnhub economic API error: {data['error']}")
+        except Exception as e:
+            print(f"  Finnhub economic calendar error: {e}")
+
+    # Fallback: build a static list of known major recurring US events this week
+    if not events:
+        print("  Using curated major US economic events list")
         now = datetime.now(KST)
-        from_date = now.strftime("%Y-%m-%d")
-        to_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
-        url = f"https://finnhub.io/api/v1/calendar/economic?from={from_date}&to={to_date}&token={FINNHUB_API_KEY}"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        print(f"  Finnhub economic response keys: {list(data.keys())}")
-        events = data.get("economicCalendar", data.get("result", []))
-        if not events and isinstance(data, list):
-            events = data
-        print(f"  Total events before filter: {len(events)}")
-        if events:
-            sample = events[0]
-            print(f"  Sample event keys: {list(sample.keys())}")
-            print(f"  Sample event: {sample}")
-        # impact is a string: "high", "medium", "low"
-        impact_order = {"high": 3, "medium": 2, "low": 1}
-        # Filter for US events — try both 'country' and 'countryCode'
-        important = [
-            e for e in events
-            if e.get("country", e.get("countryCode", "")) == "US"
-        ]
-        print(f"  US events after filter: {len(important)}")
-        if not important and events:
-            # If no US events found, show all countries for debug
-            countries = set(e.get("country", e.get("countryCode", "?")) for e in events[:20])
-            print(f"  Available countries: {countries}")
-        # Sort by impact descending
-        important.sort(key=lambda x: impact_order.get(str(x.get("impact", "")).lower(), 0), reverse=True)
-        return [
-            {
-                "event": e.get("event", ""),
-                "date": e.get("time", ""),
-                "impact": str(e.get("impact", "low")).lower(),
-                "actual": e.get("actual"),
-                "estimate": e.get("estimate"),
-                "prev": e.get("prev"),
-                "unit": e.get("unit", ""),
-            }
-            for e in important[:15]
-        ]
+        week_start = now.strftime("%Y-%m-%d")
+        events = _get_curated_economic_events(week_start)
+
+    # Sort by impact
+    impact_order = {"high": 3, "medium": 2, "low": 1}
+    events.sort(key=lambda x: impact_order.get(x.get("impact", ""), 0), reverse=True)
+    return events[:15]
+
+
+def _get_curated_economic_events(date_str: str) -> list[dict]:
+    """Use Gemini to identify this week's key US economic events."""
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = f"""오늘은 {date_str}입니다. 이번 주(오늘~7일 후)에 예정된 미국 주요 경제 지표 발표 일정을 알려주세요.
+
+Return ONLY valid JSON — no markdown fences:
+{{
+  "events": [
+    {{
+      "event": "이벤트명 (영문, 예: CPI MoM, FOMC Minutes, Initial Jobless Claims)",
+      "date": "YYYY-MM-DD",
+      "impact": "high / medium / low",
+      "estimate": "시장 예상치 (있으면)",
+      "prev": "이전 발표치 (있으면)"
+    }}
+  ]
+}}
+
+Rules:
+- 미국(US) 경제 지표만 포함
+- FOMC, CPI, PPI, NFP, GDP, ISM, Jobless Claims, Retail Sales, Fed 연설 등
+- 날짜가 확실한 것만 포함
+- 최대 10개"""
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt
+        )
+        text = response.text.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+        return data.get("events", [])
     except Exception as e:
-        print(f"  Warning: could not fetch economic calendar: {e}")
+        print(f"  Curated events generation error: {e}")
         return []
 
 
@@ -782,20 +810,48 @@ def build_html_email(
           <div style="font-size:13px;color:#444;line-height:1.8;"><strong>주요 이벤트:</strong> {mp.get('upcoming_events','')}</div>
         </div>"""
 
-    # === Earnings Watch ===
+    # === Earnings Watch (raw data table + AI analysis) ===
     ew = analysis.get("earnings_watch", {})
     ew_html = ""
+    # AI summary
     if ew:
-        reports = ""
+        ai_reports = ""
         for r in ew.get("key_reports", []):
-            reports += f"""<div style="background:#f8f9fa;padding:8px 14px;border-radius:6px;margin-bottom:6px;">
+            ai_reports += f"""<div style="background:#f0f7ff;padding:8px 14px;border-radius:6px;margin-bottom:6px;border-left:3px solid #3498db;">
               <span style="font-size:13px;font-weight:bold;color:#2c3e50;">{r.get('company','')} ({r.get('date','')})</span>
               <div style="font-size:12px;color:#555;margin-top:2px;">{r.get('expectation','')}</div>
               <div style="font-size:11px;color:#e67e22;">{r.get('impact','')}</div>
             </div>"""
-        ew_html = f"""<div style="margin-bottom:20px;">
+        ew_html += f"""<div style="margin-bottom:14px;">
           <div style="font-size:13px;color:#444;line-height:1.7;margin-bottom:10px;">{ew.get('summary','')}</div>
-          {reports}</div>"""
+          {ai_reports}</div>"""
+    # Raw earnings data table (always show if data exists)
+    if earnings_cal:
+        earn_rows = ""
+        for e in earnings_cal[:15]:
+            hour_label = {"bmo": "장전", "amc": "장후", "dmh": "장중"}.get(str(e.get("hour", "")).lower(), e.get("hour", "-"))
+            eps = e.get("eps_estimate", "-") or "-"
+            rev = e.get("revenue_estimate")
+            rev_str = f"${rev/1e9:.1f}B" if rev and rev > 1e9 else f"${rev/1e6:.0f}M" if rev and rev > 1e6 else str(rev) if rev else "-"
+            earn_rows += f"""<tr style="border-bottom:1px solid #f0f0f0;">
+              <td style="padding:6px 10px;font-size:12px;color:#888;">{e.get('date', '-')}</td>
+              <td style="padding:6px 10px;font-size:12px;color:#2c3e50;font-weight:600;">{e.get('symbol', '')}</td>
+              <td style="padding:6px 10px;font-size:12px;text-align:center;color:#888;">{hour_label}</td>
+              <td style="padding:6px 10px;font-size:12px;text-align:right;color:#2c3e50;">{eps}</td>
+              <td style="padding:6px 10px;font-size:12px;text-align:right;color:#888;">{rev_str}</td>
+            </tr>"""
+        ew_html += f"""<div style="margin-top:10px;">
+          <div style="font-size:12px;font-weight:bold;color:#555;margin-bottom:6px;">📋 이번 주 실적 발표 일정</div>
+          <table style="width:100%;border-collapse:collapse;background:#fafafa;border-radius:6px;overflow:hidden;">
+            <thead><tr style="background:#f0f0f0;">
+              <th style="padding:5px 10px;text-align:left;font-size:10px;color:#888;">날짜</th>
+              <th style="padding:5px 10px;text-align:left;font-size:10px;color:#888;">종목</th>
+              <th style="padding:5px 10px;text-align:center;font-size:10px;color:#888;">시간</th>
+              <th style="padding:5px 10px;text-align:right;font-size:10px;color:#888;">EPS 예상</th>
+              <th style="padding:5px 10px;text-align:right;font-size:10px;color:#888;">매출 예상</th>
+            </tr></thead><tbody>{earn_rows}</tbody></table></div>"""
+    if not ew_html:
+        ew_html = '<div style="font-size:13px;color:#888;">이번 주 주요 실적 발표 데이터가 없습니다.</div>'
 
     # === Economic Calendar Table ===
     econ_html = ""
