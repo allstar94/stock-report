@@ -237,14 +237,27 @@ def fetch_economic_calendar() -> list[dict]:
         url = f"https://finnhub.io/api/v1/calendar/economic?from={from_date}&to={to_date}&token={FINNHUB_API_KEY}"
         resp = requests.get(url, timeout=10)
         data = resp.json()
-        events = data.get("economicCalendar", [])
+        print(f"  Finnhub economic response keys: {list(data.keys())}")
+        events = data.get("economicCalendar", data.get("result", []))
+        if not events and isinstance(data, list):
+            events = data
+        print(f"  Total events before filter: {len(events)}")
+        if events:
+            sample = events[0]
+            print(f"  Sample event keys: {list(sample.keys())}")
+            print(f"  Sample event: {sample}")
         # impact is a string: "high", "medium", "low"
         impact_order = {"high": 3, "medium": 2, "low": 1}
-        # Filter for US events
+        # Filter for US events — try both 'country' and 'countryCode'
         important = [
             e for e in events
-            if e.get("country", "") == "US"
+            if e.get("country", e.get("countryCode", "")) == "US"
         ]
+        print(f"  US events after filter: {len(important)}")
+        if not important and events:
+            # If no US events found, show all countries for debug
+            countries = set(e.get("country", e.get("countryCode", "?")) for e in events[:20])
+            print(f"  Available countries: {countries}")
         # Sort by impact descending
         important.sort(key=lambda x: impact_order.get(str(x.get("impact", "")).lower(), 0), reverse=True)
         return [
