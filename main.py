@@ -207,7 +207,7 @@ def fetch_fear_greed_index() -> dict:
         except Exception as e:
             print(f"  Fear & Greed warning ({url}): {e}")
     print("  Warning: all Fear & Greed sources failed")
-        return {}
+    return {}
 
 
 def fetch_yield_curve(bond_data: list[dict]) -> dict:
