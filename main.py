@@ -238,19 +238,20 @@ def fetch_economic_calendar() -> list[dict]:
         resp = requests.get(url, timeout=10)
         data = resp.json()
         events = data.get("economicCalendar", [])
-        # Filter for US events (impact >= 1 to catch more events)
+        # impact is a string: "high", "medium", "low"
+        impact_order = {"high": 3, "medium": 2, "low": 1}
+        # Filter for US events
         important = [
             e for e in events
             if e.get("country", "") == "US"
-            and e.get("impact", 0) >= 1
         ]
         # Sort by impact descending
-        important.sort(key=lambda x: x.get("impact", 0), reverse=True)
+        important.sort(key=lambda x: impact_order.get(str(x.get("impact", "")).lower(), 0), reverse=True)
         return [
             {
                 "event": e.get("event", ""),
                 "date": e.get("time", ""),
-                "impact": e.get("impact", 0),
+                "impact": str(e.get("impact", "low")).lower(),
                 "actual": e.get("actual"),
                 "estimate": e.get("estimate"),
                 "prev": e.get("prev"),
@@ -788,7 +789,8 @@ def build_html_email(
     if economic_cal:
         econ_rows = ""
         for e in economic_cal[:8]:
-            impact_dots = "🔴" * min(e.get("impact", 0), 3)
+            impact_map = {"high": "🔴🔴🔴", "medium": "🟡🟡", "low": "⚪"}
+            impact_dots = impact_map.get(str(e.get("impact", "low")).lower(), "⚪")
             econ_rows += f"""<tr style="border-bottom:1px solid #f0f0f0;">
               <td style="padding:6px 10px;font-size:12px;color:#888;">{e['date']}</td>
               <td style="padding:6px 10px;font-size:12px;color:#2c3e50;font-weight:600;">{e['event']}</td>
@@ -869,6 +871,21 @@ def build_html_email(
       {recap_html}
 
       <div style="margin-bottom:28px;">
+        {section_header("💼", "이번 주 실적 발표 (Earnings)", "#0d4f8b")}
+        {ew_html}
+      </div>
+
+      <div style="margin-bottom:28px;">
+        {section_header("📅", "이번 주 경제 캘린더", "#5b2c6f")}
+        {econ_html}
+      </div>
+
+      <div style="margin-bottom:28px;">
+        {section_header("🔑", "핵심 하이라이트")}
+        {hl_html}
+      </div>
+
+      <div style="margin-bottom:28px;">
         {section_header("📈", "시장 데이터")}
         {market_tables}
       </div>
@@ -884,22 +901,7 @@ def build_html_email(
         {watchlist_html}
       </div>
 
-      <div style="margin-bottom:28px;">
-        {section_header("🔑", "핵심 하이라이트")}
-        {hl_html}
-      </div>
-
       {mp_html}
-
-      <div style="margin-bottom:28px;">
-        {section_header("📅", "이번 주 경제 캘린더")}
-        {econ_html}
-      </div>
-
-      <div style="margin-bottom:28px;">
-        {section_header("💼", "실적 발표 워치")}
-        {ew_html}
-      </div>
 
       {kr_html}
 
